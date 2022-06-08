@@ -13,13 +13,31 @@ Usage:
 """
 
 import argparse
+import numpy as np
+import matplotlib
+import matplotlib.pyplot as plt
 import os
 import sys
+import sqlite3
+import datetime
 from pathlib import Path
+import keyboard
+
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Dense, Dropout, Flatten
+from tensorflow.keras.layers import Conv2D
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.layers import MaxPooling2D
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
 
 import cv2
 import torch
 import torch.backends.cudnn as cudnn
+
+import openpyxl
+from openpyxl import Workbook
+
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 FILE = Path(__file__).resolve()
 ROOT = FILE.parents[0]  # root directory
@@ -33,6 +51,9 @@ from utils.general import (LOGGER, check_file, check_img_size, check_imshow, che
                            increment_path, non_max_suppression, print_args, scale_coords, strip_optimizer, xyxy2xywh)
 from utils.plots import Annotator, colors, save_one_box
 from utils.torch_utils import select_device, time_sync
+
+
+
 
 
 @torch.no_grad()
@@ -62,6 +83,63 @@ def run(weights=ROOT / 'yolov3.pt',  # model.pt path(s)
         half=False,  # use FP16 half-precision inference
         dnn=False,  # use OpenCV DNN for ONNX inference
         ):
+    train_dir = 'data/train'
+    val_dir = 'data/test'
+
+    num_train = 718
+    num_val = 120
+    batch_size = 64
+    num_epoch = 50
+
+    train_datagen = ImageDataGenerator(rescale=1./255)
+    val_datagen = ImageDataGenerator(rescale=1./255)
+
+    train_generator = train_datagen.flow_from_directory(
+        train_dir,
+        target_size=(48,48),
+        batch_size=batch_size,
+        color_mode="grayscale",
+        class_mode='categorical')
+
+    validation_generator = val_datagen.flow_from_directory(
+        val_dir,
+        target_size=(48,48),
+        batch_size=batch_size,
+        color_mode="grayscale",
+        class_mode='categorical')
+
+    # Create the model
+    model_emo = Sequential()
+
+    model_emo.add(Conv2D(32, kernel_size=(3, 3), activation='relu', input_shape=(48,48,1)))
+    model_emo.add(Conv2D(64, kernel_size=(3, 3), activation='relu'))
+    model_emo.add(MaxPooling2D(pool_size=(2, 2)))
+    model_emo.add(Dropout(0.25))
+
+    model_emo.add(Conv2D(128, kernel_size=(3, 3), activation='relu'))
+    model_emo.add(MaxPooling2D(pool_size=(2, 2)))
+    model_emo.add(Conv2D(128, kernel_size=(3, 3), activation='relu'))
+    model_emo.add(MaxPooling2D(pool_size=(2, 2)))
+    model_emo.add(Dropout(0.25))
+
+    model_emo.add(Flatten())
+    model_emo.add(Dense(1024, activation='relu'))
+    model_emo.add(Dropout(0.5))
+    model_emo.add(Dense(12, activation='softmax'))
+
+    connection = sqlite3.connect('Attendance.db',
+                                          detect_types=sqlite3.PARSE_DECLTYPES |
+                                          sqlite3.PARSE_COLNAMES)
+    cursor = connection.cursor()
+    #cursor.execute("DROP IF EXISTS ATTENDANCE")
+    #createTable = '''CREATE TABLE ATTENDANCE (
+    #                         StudentName VARCHAR(50),
+    #                         attendance VARCHAR(20),
+    #                         Date Date,
+    #                         Time VARCHAR(10));'''
+    #cursor.execute(createTable)
+
+    save_crop=True
     source = str(source)
     save_img = not nosave and not source.endswith('.txt')  # save inference images
     is_file = Path(source).suffix[1:] in (IMG_FORMATS + VID_FORMATS)
@@ -69,6 +147,12 @@ def run(weights=ROOT / 'yolov3.pt',  # model.pt path(s)
     webcam = source.isnumeric() or source.endswith('.txt') or (is_url and not is_file)
     if is_url and is_file:
         source = check_file(source)  # download
+
+    model_emo.load_weights('model.h5')
+
+    # dictionary which assigns each label an emotion (alphabetical order)
+    emotion_dict = {0: "Angrily Disgusted", 1:"Angrily Surprised",2:"Disgustedly Surprised", 3: "Fearfully Angry", 4:"Fearfully Disgusted", 5: "Fearfully Surprised", 6: "Happily Disgusted", 7: "Happily Surprised", 8: "Sadly Disgusted", 9: "Sadly Angry",
+    10: "Sadly Fearful", 11:"Sadly Surprised"}
 
     # Directories
     save_dir = increment_path(Path(project) / name, exist_ok=exist_ok)  # increment run
@@ -95,101 +179,157 @@ def run(weights=ROOT / 'yolov3.pt',  # model.pt path(s)
         dataset = LoadImages(source, img_size=imgsz, stride=stride, auto=pt and not jit)
         bs = 1  # batch_size
     vid_path, vid_writer = [None] * bs, [None] * bs
+    subjects=["agnus","Jothiga","Amrutha","aswin","amith","abi"]
+    detected_list=[]
 
     # Run inference
     if pt and device.type != 'cpu':
         model(torch.zeros(1, 3, *imgsz).to(device).type_as(next(model.model.parameters())))  # warmup
     dt, seen = [0.0, 0.0, 0.0], 0
-    for path, im, im0s, vid_cap, s in dataset:
-        t1 = time_sync()
-        im = torch.from_numpy(im).to(device)
-        im = im.half() if half else im.float()  # uint8 to fp16/32
-        im /= 255  # 0 - 255 to 0.0 - 1.0
-        if len(im.shape) == 3:
-            im = im[None]  # expand for batch dim
-        t2 = time_sync()
-        dt[0] += t2 - t1
+    try:
+        for path, im, im0s, vid_cap, s in dataset:
+            t1 = time_sync()
+            im = torch.from_numpy(im).to(device)
+            im = im.half() if half else im.float()  # uint8 to fp16/32
+            im /= 255  # 0 - 255 to 0.0 - 1.0
+            if len(im.shape) == 3:
+                im = im[None]  # expand for batch dim
+            t2 = time_sync()
+            dt[0] += t2 - t1
 
-        # Inference
-        visualize = increment_path(save_dir / Path(path).stem, mkdir=True) if visualize else False
-        pred = model(im, augment=augment, visualize=visualize)
-        t3 = time_sync()
-        dt[1] += t3 - t2
+            # Inference
+            visualize = increment_path(save_dir / Path(path).stem, mkdir=True) if visualize else False
+            pred = model(im, augment=augment, visualize=visualize)
+            t3 = time_sync()
+            dt[1] += t3 - t2
 
-        # NMS
-        pred = non_max_suppression(pred, conf_thres, iou_thres, classes, agnostic_nms, max_det=max_det)
-        dt[2] += time_sync() - t3
+            # NMS
+            pred = non_max_suppression(pred, conf_thres, iou_thres, classes, agnostic_nms, max_det=max_det)
+            dt[2] += time_sync() - t3
 
-        # Second-stage classifier (optional)
+            # Second-stage classifier (optional)
         # pred = utils.general.apply_classifier(pred, classifier_model, im, im0s)
 
         # Process predictions
-        for i, det in enumerate(pred):  # per image
-            seen += 1
-            if webcam:  # batch_size >= 1
-                p, im0, frame = path[i], im0s[i].copy(), dataset.count
-                s += f'{i}: '
-            else:
-                p, im0, frame = path, im0s.copy(), getattr(dataset, 'frame', 0)
+            for i, det in enumerate(pred):  # per image
+                seen += 1
+                if webcam:  # batch_size >= 1
+                    p, im0, frame = path[i], im0s[i].copy(), dataset.count
+                    s += f'{i}: '
+                else:
+                    p, im0, frame = path, im0s.copy(), getattr(dataset, 'frame', 0)
 
-            p = Path(p)  # to Path
-            save_path = str(save_dir / p.name)  # im.jpg
-            txt_path = str(save_dir / 'labels' / p.stem) + ('' if dataset.mode == 'image' else f'_{frame}')  # im.txt
-            s += '%gx%g ' % im.shape[2:]  # print string
-            gn = torch.tensor(im0.shape)[[1, 0, 1, 0]]  # normalization gain whwh
-            imc = im0.copy() if save_crop else im0  # for save_crop
-            annotator = Annotator(im0, line_width=line_thickness, example=str(names))
-            if len(det):
-                # Rescale boxes from img_size to im0 size
-                det[:, :4] = scale_coords(im.shape[2:], det[:, :4], im0.shape).round()
+                p = Path(p)  # to Path
+                save_path = str(save_dir / p.name)  # im.jpg
+                txt_path = str(save_dir / 'labels' / p.stem) + ('' if dataset.mode == 'image' else f'_{frame}')  # im.txt
+                s += '%gx%g ' % im.shape[2:]  # print string
+                gn = torch.tensor(im0.shape)[[1, 0, 1, 0]]  # normalization gain whwh
+                imc = im0.copy() if save_crop else im0  # for save_crop
+                annotator = Annotator(im0, line_width=line_thickness, example=str(names))
+                if len(det):
+                    # Rescale boxes from img_size to im0 size
+                    det[:, :4] = scale_coords(im.shape[2:], det[:, :4], im0.shape).round()
 
-                # Print results
-                for c in det[:, -1].unique():
-                    n = (det[:, -1] == c).sum()  # detections per class
-                    s += f"{n} {names[int(c)]}{'s' * (n > 1)}, "  # add to string
+                    # Print results
+                    for c in det[:, -1].unique():
+                        n = (det[:, -1] == c).sum()  # detections per class
+                        s += f"{n} {names[int(c)]}{'s' * (n > 1)}, "  # add to string
+                        detected_list.append(names[int(c)])
 
-                # Write results
-                for *xyxy, conf, cls in reversed(det):
-                    if save_txt:  # Write to file
-                        xywh = (xyxy2xywh(torch.tensor(xyxy).view(1, 4)) / gn).view(-1).tolist()  # normalized xywh
-                        line = (cls, *xywh, conf) if save_conf else (cls, *xywh)  # label format
-                        with open(txt_path + '.txt', 'a') as f:
-                            f.write(('%g ' * len(line)).rstrip() % line + '\n')
+                    detected_list=list(set(detected_list))
 
-                    if save_img or save_crop or view_img:  # Add bbox to image
-                        c = int(cls)  # integer class
-                        label = None if hide_labels else (names[c] if hide_conf else f'{names[c]} {conf:.2f}')
-                        annotator.box_label(xyxy, label, color=colors(c, True))
-                        if save_crop:
-                            save_one_box(xyxy, imc, file=save_dir / 'crops' / names[c] / f'{p.stem}.jpg', BGR=True)
+                    # Write results
+                    for *xyxy, conf, cls in reversed(det):
+                        if save_txt:  # Write to file
+                            xywh = (xyxy2xywh(torch.tensor(xyxy).view(1, 4)) / gn).view(-1).tolist()  # normalized xywh
+                            line = (cls, *xywh, conf) if save_conf else (cls, *xywh)  # label format
+                            with open(txt_path + '.txt', 'a') as f:
+                                f.write(('%g ' * len(line)).rstrip() % line + '\n')
 
-            # Print time (inference-only)
-            LOGGER.info(f'{s}Done. ({t3 - t2:.3f}s)')
+                        if (save_img or save_crop or view_img) and (conf>=0.8):  # Add bbox to image
+                            gray_image = cv2.cvtColor(imc, cv2.COLOR_BGR2GRAY)
+                            cropped_img = np.expand_dims(np.expand_dims(cv2.resize(gray_image, (48, 48)), -1), 0)
+                            prediction = model_emo.predict(cropped_img)
+                            maxindex = int(np.argmax(prediction))
+                            c = int(cls)  # integer class
+                            label = None if hide_labels else (names[c] if hide_conf else f'{names[c]} {conf:.2f}')
+                            label=label+'\n'+emotion_dict[maxindex]
+                            print(label,"====\n")
+                            annotator.box_label(xyxy, label, color=colors(c, True))
+                            if save_crop:
+                                save_one_box(xyxy, imc, file=save_dir / 'crops' / names[c] / f'{p.stem}.jpg', BGR=True)
+                        if keyboard.is_pressed('q'):
+                            break
+                    if keyboard.is_pressed('q'):
+                        break
+                        
 
-            # Stream results
-            im0 = annotator.result()
-            if view_img:
-                cv2.imshow(str(p), im0)
-                cv2.waitKey(1)  # 1 millisecond
+                # Print time (inference-only)
+                LOGGER.info(f'{s}Done. ({t3 - t2:.3f}s)')
 
-            # Save results (image with detections)
-            if save_img:
-                if dataset.mode == 'image':
-                    cv2.imwrite(save_path, im0)
-                else:  # 'video' or 'stream'
-                    if vid_path[i] != save_path:  # new video
-                        vid_path[i] = save_path
-                        if isinstance(vid_writer[i], cv2.VideoWriter):
-                            vid_writer[i].release()  # release previous video writer
-                        if vid_cap:  # video
-                            fps = vid_cap.get(cv2.CAP_PROP_FPS)
-                            w = int(vid_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-                            h = int(vid_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-                        else:  # stream
-                            fps, w, h = 30, im0.shape[1], im0.shape[0]
-                            save_path += '.mp4'
-                        vid_writer[i] = cv2.VideoWriter(save_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
-                    vid_writer[i].write(im0)
+                # Stream results
+                im0 = annotator.result()
+                if view_img:
+                    cv2.imshow(str(p), im0)
+                    cv2.waitKey(1)  # 1 millisecond
+            
+                #write attendance results to xlsx
+                workbook = Workbook()
+                workbook.save(filename="attendance.xlsx")
+                wb = openpyxl.Workbook() 
+                sheet = wb.active
+                for i in range(1,len(subjects)+1):
+                    sheet.cell(row=i,column=1).value=subjects[i-1]
+                for i in range(1,len(subjects)+1):
+                    print("===",detected_list.count(sheet.cell(row=i,column=1).value))
+                    if(detected_list.count(sheet.cell(row=i,column=1).value)>0):
+                        sheet.cell(row=i,column=2).value="present"
+                        sheet.cell(row=i,column=3).value=str(datetime.datetime.now())[0:10]
+                        sheet.cell(row=i,column=4).value=str(datetime.datetime.now())[11:16]
+                    else:
+                        sheet.cell(row=i,column=2).value="absent"
+                wb.save("attendance.xlsx")
+                i=0
+
+                
+
+                # Save results (image with detections)
+                if save_img:
+                    if dataset.mode == 'image':
+                        cv2.imwrite(save_path, im0)
+                    else:  # 'video' or 'stream'
+                        if vid_path[i] != save_path:  # new video
+                            vid_path[i] = save_path
+                            if isinstance(vid_writer[i], cv2.VideoWriter):
+                                vid_writer[i].release()  # release previous video writer
+                            if vid_cap:  # video
+                                fps = vid_cap.get(cv2.CAP_PROP_FPS)
+                                w = int(vid_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                                h = int(vid_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                            else:  # stream
+                                fps, w, h = 30, im0.shape[1], im0.shape[0]
+                                save_path += '.mp4'
+                            vid_writer[i] = cv2.VideoWriter(save_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
+                        vid_writer[i].write(im0)
+        for i in range(1, len(subjects)+1):
+                    if(sheet.cell(row=i,column=2).value=="present"):
+                        cursor.execute("insert into ATTENDANCE values(?,?,?,?)",(sheet.cell(row=i,column=1).value,sheet.cell(row=i,column=2).value,sheet.cell(row=i,column=3).value,sheet.cell(row=i,column=4).value))
+                        print(sheet.cell(row=i,column=1).value,"present - inserted")
+                    else:
+                        cursor.execute("insert into ATTENDANCE values(?,?,?,?)",(sheet.cell(row=i,column=1).value,sheet.cell(row=i,column=2).value,"NULL","NULL"))
+                        print(sheet.cell(row=i,column=1).value,"absent - inserted")
+
+    except KeyboardInterrupt:
+        pass
+
+    
+
+    
+    
+            
+    connection.commit()
+    cursor.close()
+    connection.close()
 
     # Print results
     t = tuple(x / seen * 1E3 for x in dt)  # speeds per image
